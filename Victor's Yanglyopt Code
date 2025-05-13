@@ -106,3 +106,7 @@ simulationResult.flow_map().plot_wake_map()
 plt.xlabel('x [m]')
 plt.ylabel('y [m]')
 plt.show()
+
+
+
+# test1
