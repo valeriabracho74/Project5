@@ -1,0 +1,108 @@
+import importlib
+import numpy as np
+import matplotlib.pyplot as plt
+import warnings
+
+from py_wake.site._site import UniformWeibullSite
+warnings.filterwarnings("ignore")
+from py_wake.examples.data.lillgrund import LillgrundSite
+from py_wake.deflection_models.jimenez import JimenezWakeDeflection
+from py_wake.examples.data.iea37 import IEA37_WindTurbines
+from py_wake.deficit_models.gaussian import IEA37SimpleBastankhahGaussian
+import geopandas as gpd
+from topfarm.cost_models.cost_model_wrappers import CostModelComponent
+from topfarm import TopFarmProblem
+from topfarm.plotting import NoPlot
+from topfarm.easy_drivers import EasyScipyOptimizeDriver
+
+class Sofia(UniformWeibullSite):
+    def __init__(self, ti=0.1, shear=None):
+        f = np.array([560.41  ,419.61  ,480.66  ,638.61  ,625.46  ,667.67 ,1029.07 ,1282.98 ,1340.08
+ ,1123.8   ,969.42  ,862.23])
+        f /= f.sum()
+        a = [9.3   ,8.26  ,8.96 ,10.63 ,10.6  ,10.93 ,11.55 ,12.85 ,12.95 ,12.12 ,10.91 ,10.5]
+        k = [2.205 ,1.904 ,2.479 ,2.15  ,2.162 ,2.506 ,1.893 ,2.135 ,2.436 ,2.076 ,2.146 ,2.186]
+        UniformWeibullSite.__init__(self, f, a, k, ti, shear=shear)
+
+site = Sofia()
+windTurbines = IEA37_WindTurbines()
+
+wf_model = IEA37SimpleBastankhahGaussian(site, windTurbines,deflectionModel=JimenezWakeDeflection())
+
+#choosing the flow cases for the optimization
+wsp = np.asarray([10])
+wdir = np.asarray([270])
+
+################################################################################################################################################################################
+
+# Load the GeoJSON layout
+layout_gdf = gpd.read_file("sofia.geojson")
+
+layout_gdf = layout_gdf.to_crs(epsg=32631)
+
+# Extract the LineString coordinates
+turbine_coords = []
+
+for geom in layout_gdf.geometry:
+    if geom.geom_type == 'LineString':
+        coords = list(geom.coords)
+        turbine_coords.extend(coords)
+    elif geom.geom_type == 'MultiLineString':
+        for line in geom:
+            turbine_coords.extend(list(line.coords))
+
+# Separate x and y
+x, y = zip(*turbine_coords)
+x = np.array(x)
+y = np.array(y)
+########################################################################################################################################################################
+
+# getting initial position of turbines
+
+n_wt = x.size
+
+#setting up yaw angles for each turbine, wind direction and wind speed
+i = n_wt
+k = wsp.size
+l = wdir.size
+yaw_zero = np.zeros((i,l,k))  #initial condition of yaw angles
+
+def aep_func(yaw_ilk):
+    simres = wf_model(x,y,wd=wdir,ws=wsp,yaw=yaw_ilk, tilt=0)
+    aep = simres.aep().sum()
+    return aep
+
+cost_comp = CostModelComponent(input_keys=[('yaw_ilk', np.zeros((i, l, k)))],
+                                          n_wt = n_wt,
+                                          cost_function = aep_func,
+                                          objective=True,
+                                          maximize=True,
+                                          output_keys=[('AEP', 0)]
+                                          )
+
+maxiter = 500
+tol=1e-10
+ec=1e-4
+
+problem = TopFarmProblem(design_vars={'yaw_ilk': (yaw_zero, -30, 30)},  #setting up initial values and lower and upper bounds for yaw angles
+                          n_wt=n_wt,
+                          cost_comp=cost_comp,
+                          driver=EasyScipyOptimizeDriver(optimizer='SLSQP', maxiter=maxiter, tol=tol),
+                          plot_comp=NoPlot(),
+                          expected_cost=ec)
+
+_, state,_ = problem.optimize()
+
+simulationResult = wf_model(x,y,wd=wdir[0], ws=wsp[0], yaw=state['yaw_ilk'][:,0,0], tilt=0)
+
+initial_aep = aep_func(yaw_zero)
+print(f"Initial AEP: {initial_aep:.2f} MWh")
+
+optimized_aep = aep_func(state['yaw_ilk'])
+print(f"Optimized AEP: {optimized_aep:.2f} MWh")
+
+plt.figure(figsize=(12,4))
+simulationResult.flow_map().plot_wake_map()
+plt.xlabel('x [m]')
+plt.ylabel('y [m]')
+plt.show()
